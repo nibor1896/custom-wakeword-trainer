@@ -1,0 +1,14 @@
+# Torch mit CUDA (fuer GPU); fuer CPU-only die --extra-index-url-Zeile entfernen.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch
+openwakeword
+audiomentations==0.33.0
+soundfile
+librosa
+numpy
+requests
+
+# Nur fuer die Positiv-Generierung (piper-sample-generator):
+# webrtcvad baut auf Python 3.13 nicht -> webrtcvad-wheels (vorgebautes Wheel) nutzen.
+piper-tts==1.3.0
+webrtcvad-wheels
