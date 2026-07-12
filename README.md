@@ -1,62 +1,62 @@
 # custom-wakeword-trainer
 
-Ein **lokaler Trainer für eigene [openWakeWord](https://github.com/dscripka/openWakeWord)-Wake-Words** — eine reproduzierbare Rezeptur + Skripte, mit denen man ein **beliebiges** Wake-Word ("Hey Jarvis", "Computer", "Hey Horus", …) trainiert. Läuft **lokal auf Windows + Python 3.13**, wo das offizielle openWakeWord-Colab-Notebook seit 2023 nicht mehr durchläuft.
+A **local trainer for your own [openWakeWord](https://github.com/dscripka/openWakeWord) wake words** — a reproducible recipe + scripts to train **any** wake word ("Hey Jarvis", "Computer", "Hey Horus", …). Runs **locally on Windows + Python 3.13**, where the official openWakeWord Colab notebook has been bit-rotted since 2023.
 
-> **"Hey Horus"** ist das erste, vollständig durchgerechnete Beispielmodell (entstanden fürs [Horus](https://github.com/nibor1896/Horus)-Projekt).
+> **"Hey Horus"** is the first fully worked example model (built for the [Horus](https://github.com/nibor1896/Horus) project).
 
-## Was am Ende rauskommt
+## What you get
 
-Eine winzige Datei `<phrase>.onnx` (~840 KB). Laufzeitkette:
+A tiny `<phrase>.onnx` file (~840 KB). Runtime chain:
 
 ```
-Mikro 16 kHz → melspectrogram.onnx → embedding_model.onnx → <phrase>.onnx → Wahrscheinlichkeit → Schwelle
+mic 16 kHz → melspectrogram.onnx → embedding_model.onnx → <phrase>.onnx → probability → threshold
 ```
 
-Die ersten beiden ONNX-Modelle sind die generischen, für **alle** openWakeWord-Modelle gleichen Feature-Extraktoren (Apache-2.0). Nur `<phrase>.onnx` ist das trainierte, phrasen-spezifische Teil → **Standard-openWakeWord-Format**, direkt nutzbar in Home Assistant / Rhasspy / ESPHome / eigenen Runtimes.
+The first two ONNX models are the generic feature extractors shared by **all** openWakeWord models (Apache-2.0). Only `<phrase>.onnx` is the trained, phrase-specific part → **standard openWakeWord format**, usable directly in Home Assistant / Rhasspy / ESPHome / your own runtimes.
 
-**Warum ein trainierter Klassifikator statt Distanzvergleich, und warum überhaupt eine Eigenlösung:** siehe [Issue #1](https://github.com/nibor1896/custom-wakeword-trainer/issues/1). Kurz: reiner Embedding-Distanzvergleich (DTW/Cosine) trennt auf echter Stimme nicht (Sprecher dominiert den Inhalt), und der offizielle Trainingsweg ist kaputt.
+**Why a trained classifier instead of a distance comparison, and why a custom solution at all:** see [Issue #1](https://github.com/nibor1896/custom-wakeword-trainer/issues/1). In short: a plain embedding distance comparison (DTW/cosine) doesn't separate on a real voice (speaker identity dominates the content), and the official training path is broken.
 
-## Voraussetzungen
+## Requirements
 
-- Python 3.13 (Windows getestet), NVIDIA-GPU empfohlen (CPU geht, ist langsamer).
-- ~20 GB freier Platz (16 GB Negativ-Features + Zwischendaten).
-- Die beiden generischen Feature-Modelle von openWakeWord (v0.5.1):
+- Python 3.13 (tested on Windows), NVIDIA GPU recommended (CPU works, just slower).
+- ~20 GB free space (16 GB negative features + intermediate data).
+- The two generic feature models from openWakeWord (v0.5.1):
   [`melspectrogram.onnx`](https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.onnx),
   [`embedding_model.onnx`](https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx).
 
-## Rezept
+## Recipe
 
 ```bash
 python -m venv venv && venv\Scripts\pip install -r requirements.txt
 ```
 
-1. **Negativ-Features laden** (~16 GB, vorberechnet, ~2000 Std. Sprache/Musik/Rauschen):
+1. **Download negative features** (~16 GB, precomputed, ~2000 h of speech/music/noise):
    `python scripts/download_negatives.py`
-2. **Synthetische Positive generieren** (viele Sprecher, via [piper-sample-generator](https://github.com/rhasspy/piper-sample-generator)):
+2. **Generate synthetic positives** (many speakers, via [piper-sample-generator](https://github.com/rhasspy/piper-sample-generator)):
    ```bash
-   # webrtcvad baut auf 3.13 nicht -> webrtcvad-wheels nutzen (in requirements.txt)
+   # webrtcvad does not build on 3.13 -> use webrtcvad-wheels (in requirements.txt)
    set PYTHONIOENCODING=utf-8
    python -m piper_sample_generator "hey horus" --model models/en_US-libritts_r-medium.pt \
           --max-samples 20000 --batch-size 128 --output-dir data/positives
    ```
-3. **Eigene Aufnahmen — der Schlüssel: ZWEI saubere Sessions** (kein Auto-Labeling → kein Label-Rauschen):
-   - Session A: **nur** das Wake-Word (~50×, normale Stimme, variiert) → `data/session-pos/`
-   - Session B: **nur** Negatives (normal reden, Vorlesen, harte Verwechsler, Geräusche) → `data/session-neg/`
-   - Als 16-kHz-Mono-WAV, je ~2 s.
-4. **Trainieren** (Pfade oben in der Datei anpassen):
-   `python scripts/train.py` → schreibt `<phrase>.onnx` + gibt Recall/Fehlalarme auf zurückgehaltenen Aufnahmen aus.
+3. **Your own recordings — the key: TWO clean sessions** (no auto-labeling → no label noise):
+   - Session A: **only** the wake word (~50×, normal voice, varied) → `data/session-pos/`
+   - Session B: **only** negatives (normal talking, reading aloud, hard near-homophones, noises) → `data/session-neg/`
+   - As 16 kHz mono WAV, ~2 s each.
+4. **Train** (adjust the paths at the top of the file):
+   `python scripts/train.py` → writes `<phrase>.onnx` and prints recall / false-alarm rate on held-out recordings.
 
-## Wichtigste Erkenntnisse
+## Key learnings
 
-Ausführlich in [Issue #2](https://github.com/nibor1896/custom-wakeword-trainer/issues/2). In einem Satz: **die Datenqualität entscheidet alles** — rein synthetische Positive geben auf echter Stimme nur ~8 % Trefferquote, echte Nutzer-Aufnahmen + Augmentation heben das auf ~90 %, und Whisper-Auto-Labeling gemischter Sessions ruiniert es wieder (die zwei sauberen Sessions oben sind der Fix).
+Detailed in [Issue #2](https://github.com/nibor1896/custom-wakeword-trainer/issues/2). In one sentence: **data quality is everything** — purely synthetic positives give only ~8 % recall on a real voice, real user recordings + augmentation lift that to ~90 %, and Whisper auto-labeling of mixed sessions ruins it again (the two clean sessions above are the fix).
 
-## Lizenzen
+## Licenses
 
-- openWakeWord + Feature-Modelle: Apache-2.0
-- LibriTTS-R (piper-Positivstimmen): CC-BY-4.0 → Namensnennung
-- ACAV100M: nur vorberechnete Features genutzt, kein Audio im Modell
-- Eingebrachte echte Aufnahmen sind in den Gewichten mit-eintrainiert (nicht als Audio rückgewinnbar)
+- openWakeWord + feature models: Apache-2.0
+- LibriTTS-R (piper positive voices): CC-BY-4.0 → attribution required
+- ACAV100M: only precomputed features used, no audio ends up in the model
+- Any real recordings you add are baked into the weights (not recoverable as audio)
 
 ## Status
 
-Siehe [Issue #1](https://github.com/nibor1896/custom-wakeword-trainer/issues/1). "Hey Horus" ist trainiert, in Horus integriert und live bestätigt (90 % Recall, 0 Alltags-Fehlalarme).
+See [Issue #1](https://github.com/nibor1896/custom-wakeword-trainer/issues/1). "Hey Horus" is trained, integrated into Horus, and confirmed live (90 % recall, 0 everyday false alarms).
