@@ -14,7 +14,19 @@ mic 16 kHz → melspectrogram.onnx → embedding_model.onnx → <phrase>.onnx �
 
 The first two ONNX models are the generic feature extractors shared by **all** openWakeWord models (Apache-2.0). Only `<phrase>.onnx` is the trained, phrase-specific part → **standard openWakeWord format**, usable directly in Home Assistant / Rhasspy / ESPHome / your own runtimes.
 
-**Why a trained classifier instead of a distance comparison, and why a custom solution at all:** see [Issue #1](https://github.com/nibor1896/custom-wakeword-trainer/issues/1). In short: a plain embedding distance comparison (DTW/cosine) doesn't separate on a real voice (speaker identity dominates the content), and the official training path is broken.
+## Why this exists (the decisive point)
+
+The chain of reasoning that led exactly here:
+
+1. **Requirement:** a wake word that runs **fully local / offline** and stays **free forever** (a hard constraint of the project this was built for).
+2. **[Porcupine](https://picovoice.ai/platform/porcupine/)** — the obvious ready-made cross-platform wake-word engine — **discontinued its free tier on 2026-06-30**, which disqualified it under that constraint.
+3. **First attempt, WITHOUT training:** take openWakeWord's generic embeddings and compare them (DTW / cosine **distance**) against a handful of enrolled reference recordings. This **demonstrably fails on a real voice** — there is *no* separation between the wake word and arbitrary speech (at best ~46 % false alarms at 89 % recall). The reason: these embeddings encode **speaker identity** far more strongly than phrase content, so with the same speaker (you enroll, you use it) your timbre matches the reference no matter *what* you say.
+4. **Consequence:** you need a **properly trained** model — a small classifier learned over many speakers plus a lot of negative data — because only that separates the *phrase* from the *speaker*.
+5. **But** openWakeWord's **official training pipeline (the Colab notebook) has been bit-rotted since 2023** and no longer runs in 2026 (Python 3.12 incompatibilities, changed package layouts, broken data downloads).
+
+**➜ The decisive point is the combination of 3 and 5:** the simple distance-based DIY approach *doesn't work*, and the official training path *is broken*. A **working, local, reproducible trainer of your own** is therefore the only way to satisfy *free + local + reliable* at the same time — and that is exactly what this repo is.
+
+(More detail, including the measured numbers, in [Issue #1](https://github.com/nibor1896/custom-wakeword-trainer/issues/1).)
 
 ## Requirements
 
