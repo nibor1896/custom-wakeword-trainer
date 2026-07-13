@@ -53,14 +53,24 @@ python -m venv venv && venv\Scripts\pip install -r requirements.txt
    ```
 3. **Your own recordings — the key: TWO clean sessions** (no auto-labeling → no label noise):
    - Session A: **only** the wake word (~50×, normal voice, varied) → `data/session-pos/`
-   - Session B: **only** negatives (normal talking, reading aloud, hard near-homophones, noises) → `data/session-neg/`
+   - Session B: **only** negatives → `data/session-neg/`. Include normal talking, reading aloud,
+     hard near-homophones, **and the real noises of your deployment recorded through the real path**
+     — e.g. music played on your speakers and picked up by the mic, and your own keyboard (record
+     *every* key). Clean noise files help far less than the actual mic/room path.
    - As 16 kHz mono WAV, ~2 s each.
 4. **Train** (adjust the paths at the top of the file):
    `python scripts/train.py` → writes `<phrase>.onnx` and prints recall / false-alarm rate on held-out recordings.
+5. **Iterate on false triggers.** Score *all* your negatives with the fresh model and sort by score.
+   A single clip near 1.0 while its whole category sits near 0 is a **mislabeled positive** in your
+   negatives — quarantine it and retrain (don't just add data). If a real sound genuinely scores high
+   (single mechanical keys are the classic one), record that class densely. Details in
+   [Issue #2](https://github.com/nibor1896/custom-wakeword-trainer/issues/2).
 
 ## Key learnings
 
 Detailed in [Issue #2](https://github.com/nibor1896/custom-wakeword-trainer/issues/2). In one sentence: **data quality is everything** — purely synthetic positives give only ~8 % recall on a real voice, real user recordings + augmentation lift that to ~90 %, and Whisper auto-labeling of mixed sessions ruins it again (the two clean sessions above are the fix).
+
+And when a trained model keeps false-triggering on something (music, keyboard), **score your own negatives first**: a lone high-scoring clip is usually a mislabeled positive (contamination), not a genuinely hard sound — fix the data, not the threshold.
 
 ## Licenses
 
