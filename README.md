@@ -51,13 +51,28 @@ python -m venv venv && venv\Scripts\pip install -r requirements.txt
    python -m piper_sample_generator "hey horus" --model models/en_US-libritts_r-medium.pt \
           --max-samples 20000 --batch-size 128 --output-dir data/positives
    ```
-3. **Your own recordings — the key: TWO clean sessions** (no auto-labeling → no label noise):
-   - Session A: **only** the wake word (~50×, normal voice, varied) → `data/session-pos/`
-   - Session B: **only** negatives → `data/session-neg/`. Include normal talking, reading aloud,
-     hard near-homophones, **and the real noises of your deployment recorded through the real path**
-     — e.g. music played on your speakers and picked up by the mic, and your own keyboard (record
-     *every* key). Clean noise files help far less than the actual mic/room path.
-   - As 16 kHz mono WAV, ~2 s each.
+3. **Your own recordings — the key: CLEAN, SEPARATE sessions** (no auto-labeling → no label noise).
+   Use `scripts/record_sessions.py`:
+
+   ```bash
+   python scripts/record_sessions.py pos 50 8          # 50x the wake word, a cue every 8 s
+   python scripts/record_sessions.py neg 240 keyboard  # then one category at a time:
+   python scripts/record_sessions.py neg 180 tv
+   python scripts/record_sessions.py neg 180 music
+   python scripts/record_sessions.py neg 120 speech
+   python scripts/record_sessions.py neg  60 silence
+   ```
+
+   - **Positives are recorded on an automatic cadence — you never touch the keyboard.**
+     A keystroke right before each clip would end up *inside* the positives, and you are about
+     to teach the model that keyboards are **not** the wake word. Don't poison that lesson.
+   - **Negatives one category at a time.** The filenames keep the category, so when the model
+     later false-triggers you can see *which kind of sound* did it and record more of exactly that.
+   - Record the real noises **through the real mic in the real room**. Clean sample files help
+     far less than the actual path the model will live in.
+   - Cover: **keyboard** (the #1 false trigger — every key, fast and slow), **TV/YouTube**
+     (real speech that isn't yours — no VAD will save you here), **music** bleeding out of your
+     headphones, **your own speech + near-homophones** of the phrase, and plain **silence**.
 4. **Train** (adjust the paths at the top of the file):
    `python scripts/train.py` → writes `<phrase>.onnx` and prints recall / false-alarm rate on held-out recordings.
 5. **Iterate on false triggers.** Score *all* your negatives with the fresh model and sort by score.
@@ -84,6 +99,16 @@ It stays invisible if your runtime has a VAD in front (the model is simply never
 - validation reports **silence false-alarms separately** and refuses to call a model good if they are above 0 %.
 
 Measured on the old model: silence → score **1.00**; normal speech → **no false alarms at all** (peak 0.11). The model was excellent at speech and simply believed silence was the phrase.
+
+**The fix is proven.** A second wake word ("Anima") trained with the current recipe — 50 positives, ~1700 real negatives (180 keyboard clips, TV, music, near-homophones, silence) plus the ACAV features:
+
+```
+threshold 0.5: recall 90%  false alarms 0.0%  SILENCE false alarms 0.0%
+threshold 0.7: recall 90%  false alarms 0.0%  SILENCE false alarms 0.0%
+threshold 0.9: recall 90%  false alarms 0.0%  SILENCE false alarms 0.0%
+```
+
+Still 90 % recall at threshold **0.9**, with zero false alarms on a keyboard being hammered, on TV speech, on music, and on silence. That headroom is what lets you run a conservative threshold in production and lose nothing.
 
 ## Licenses
 
