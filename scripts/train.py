@@ -44,8 +44,16 @@ F = AudioFeatures(
 )
 
 
-def load16k(path):
-    """Load a clip into a TARGET-length window.
+def load_raw(path):
+    """Load a clip as it is — no padding, no window. Augmentation happens on THIS."""
+    d, sr = sf.read(path, dtype="float32", always_2d=False)
+    if d.ndim > 1:
+        d = d.mean(1)
+    return d[:TARGET]
+
+
+def place(d):
+    """Drop a clip at a RANDOM offset into the TARGET window, on a faint noise floor.
 
     Do NOT zero-pad. The positives are short (~0.8 s) and were previously left-padded with
     DIGITAL SILENCE to fill the 2 s window, while the bulk of the negatives (the ACAV features)
@@ -53,12 +61,10 @@ def load16k(path):
     positive class — the model duly learns it and then fires at score 1.00 into a completely
     silent room (measured; see issue #2).
 
-    Instead: place the clip at a RANDOM offset inside the window and fill the rest with a faint
-    noise floor, so the padding carries no class information.
+    Called AFTER augmentation, never before: stretching a clip that is already padded stretches
+    the SILENCE too, and cropping back to length then cuts the word in half. The augmentation
+    would be corrupting the very examples it is supposed to teach.
     """
-    d, sr = sf.read(path, dtype="float32", always_2d=False)
-    if d.ndim > 1:
-        d = d.mean(1)
     d = d[:TARGET]
     if len(d) == TARGET:
         return d
@@ -66,6 +72,11 @@ def load16k(path):
     off = int(rng.integers(0, TARGET - len(d) + 1))
     out[off:off + len(d)] += d
     return out
+
+
+def load16k(path):
+    """Unaugmented clip in a window — for validation and for the clean copy of each positive."""
+    return place(load_raw(path))
 
 
 def to_feat(sig):
@@ -94,21 +105,38 @@ def silence_feats(n_per_level=10):
     return np.stack(out).astype(np.float32)
 
 
+# How people ACTUALLY say the word, versus how they say it into a recording script.
+#
+# Recording sessions produce one single way of speaking: prompted, deliberate, evenly paced,
+# same distance, same posture, same evening. Real life does not. The same person calling the
+# same word across a room, half-distracted, mid-sentence, is easily 15-20% faster and a couple
+# of semitones off — and a model trained only on the session simply does not know them anymore.
+#
+# This was measured, not assumed: a model with TimeStretch(0.9, 1.1) scored 1.00 on the
+# recordings and 0.21 in the room. The same failing audio, slowed to 0.90, woke it instantly —
+# the speaker was ~11% faster than anything the model had ever seen. He was standing just
+# outside the augmentation range.
+#
+# So the range has to cover how a human varies, not how a recording session varies.
 aug = Compose([
     AddGaussianSNR(min_snr_db=3.0, max_snr_db=30.0, p=0.9),
-    Gain(min_gain_db=-10.0, max_gain_db=6.0, p=0.8),
-    PitchShift(min_semitones=-2.0, max_semitones=2.0, p=0.5),
-    TimeStretch(min_rate=0.9, max_rate=1.1, p=0.5, leave_length_unchanged=True),
+    Gain(min_gain_db=-12.0, max_gain_db=6.0, p=0.9),
+    PitchShift(min_semitones=-3.0, max_semitones=3.0, p=0.7),
+    # 0.75-1.35 and applied almost always. Speaking rate is the axis people vary MOST and the
+    # one a recording session flattens completely. leave_length_unchanged=False: the word is
+    # allowed to get longer or shorter, and place() re-windows it afterwards.
+    TimeStretch(min_rate=0.75, max_rate=1.35, p=0.9, leave_length_unchanged=False),
 ])
 
 
 def embed_aug(files, k):
+    """One clean copy per clip, then k augmented ones — augmented BEFORE being windowed."""
     out = []
     for f in files:
-        sig = load16k(f)
-        out.append(to_feat(sig))
+        raw = load_raw(f)
+        out.append(to_feat(place(raw)))
         for _ in range(k):
-            out.append(to_feat(aug(samples=sig, sample_rate=16000)))
+            out.append(to_feat(place(aug(samples=raw, sample_rate=16000))))
     return np.stack(out).astype(np.float32)
 
 
@@ -133,6 +161,31 @@ print(f"silence negatives added: {len(sil_train)}", flush=True)
 val_pos = np.stack([to_feat(load16k(f)) for f in vp_f]).astype(np.float32)
 val_neg = np.stack([to_feat(load16k(f)) for f in vn_f]).astype(np.float32)
 val_sil = silence_feats(5)          # held-out silence -> honest numbers
+
+
+def tempo_feats(files, rate):
+    """The held-out positives, spoken faster or slower — nothing else changed.
+
+    THE question this trainer has to answer. Validating only on the original clips reports a
+    proud 90% recall and tells you nothing: those clips come from the same session as the
+    training data, so of course the model knows them. A model can score 90% here and still be
+    deaf in the living room — that exact thing happened (issue #2).
+
+    A wake word is worthless if it only answers to the one cadence someone used while a script
+    was prompting them. If recall collapses a few rows down, the model has memorised a
+    recording session, not learned a word.
+    """
+    out = []
+    for f in files:
+        d = load_raw(f)
+        n = max(1, int(len(d) / rate))
+        d = np.interp(np.linspace(0, len(d) - 1, n), np.arange(len(d)), d).astype(np.float32)
+        out.append(to_feat(place(d)))
+    return np.stack(out).astype(np.float32)
+
+
+TEMPI = [0.80, 0.90, 1.00, 1.10, 1.20, 1.30]
+val_tempo = {r: tempo_feats(vp_f, r) for r in TEMPI}
 
 neg_mm = np.load(NEG_FEATURES, mmap_mode="r")
 acav = torch.from_numpy(
@@ -215,6 +268,29 @@ for t in [0.5, 0.7, 0.9]:
 # word — exactly the bug from issue #2, which used to slip through unnoticed.
 if (vs >= 0.5).mean() > 0:
     print("\n  !! WARNING: the model fires on SILENCE. Do not ship it.", flush=True)
+
+# --- THE REAL TEST: does it still know the word when it is spoken differently? --------------
+print("\n=== ROBUSTNESS: the same held-out calls, spoken faster / slower ===", flush=True)
+print("  (recall at threshold 0.7 — a model that only works at 1.00 has memorised a session)")
+weak = []
+with torch.no_grad():
+    for r in TEMPI:
+        v = net(torch.from_numpy(val_tempo[r]).to(dev)).squeeze(1).cpu().numpy()
+        recall = (v >= 0.7).mean() * 100
+        bar = "#" * int(recall / 5)
+        tag = "  <- as recorded" if r == 1.00 else ""
+        print(f"  speed {r:.2f}: {recall:3.0f}%  {bar}{tag}", flush=True)
+        if 0.85 <= r <= 1.25 and recall < 60:
+            weak.append(r)
+
+if weak:
+    print("\n  !! WARNING: recall collapses at normal speaking rates "
+          f"({', '.join(f'{r:.2f}x' for r in weak)}).", flush=True)
+    print("     This model will pass its own validation and then fail in the room. Record the")
+    print("     wake word the way you ACTUALLY say it — casually, mid-sentence, across the")
+    print("     room — not only the way a prompt tells you to say it.", flush=True)
+else:
+    print("\n  Recall holds across speaking rates: it learned the WORD, not the recording.", flush=True)
 
 net.to("cpu")
 torch.onnx.export(net, torch.rand(1, 16, 96), OUT, output_names=["probability"], dynamo=False)
