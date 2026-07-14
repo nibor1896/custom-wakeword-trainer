@@ -19,11 +19,14 @@ import torch.nn as nn
 from audiomentations import AddGaussianSNR, Compose, Gain, PitchShift, TimeStretch
 from openwakeword.utils import AudioFeatures
 
-# ======================= CONFIG (adjust) =========================
+# ======================= CONFIG =========================
+# Everything can be overridden by environment variables, so the same recipe can train a
+# different phrase from a different data folder without editing this file:
+#   WW_PHRASE=anima  WW_DATA=D:\some\where  python scripts/train.py
 HERE = os.path.dirname(__file__)
-DATA = os.path.join(HERE, "..", "data")
-PHRASE = "hey_horus"
-MODELS_DIR = os.path.join(DATA, "models")                       # melspectrogram.onnx + embedding_model.onnx (openWakeWord v0.5.1)
+DATA = os.environ.get("WW_DATA") or os.path.join(HERE, "..", "data")
+PHRASE = os.environ.get("WW_PHRASE", "hey_horus")
+MODELS_DIR = os.environ.get("WW_MODELS") or os.path.join(DATA, "models")   # melspectrogram.onnx + embedding_model.onnx (openWakeWord v0.5.1)
 POS_DIR = os.path.join(DATA, "session-pos")                     # clean session: ONLY the wake word, 16 kHz mono WAV
 NEG_DIR = os.path.join(DATA, "session-neg")                     # clean session: ONLY negatives
 NEG_FEATURES = os.path.join(DATA, "neg_ACAV100M_2000hrs.npy")   # from download_negatives.py
