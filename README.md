@@ -72,6 +72,19 @@ Detailed in [Issue #2](https://github.com/nibor1896/custom-wakeword-trainer/issu
 
 And when a trained model keeps false-triggering on something (music, keyboard), **score your own negatives first**: a lone high-scoring clip is usually a mislabeled positive (contamination), not a genuinely hard sound — fix the data, not the threshold.
 
+### ⚠️ Never zero-pad the positives (fixed 2026-07-14)
+
+The nastiest bug this recipe had. Your wake word is short (~0.8 s), the training window is 2 s — so the clip gets padded. If you pad with **digital silence**, while the bulk of your negatives (ACAV features) is **full-length audio**, then *"lots of leading silence"* becomes a near-perfect cue for the positive class. The model learns it happily — and then **fires at score 1.00 into a completely silent room**.
+
+It stays invisible if your runtime has a VAD in front (the model is simply never asked while it's quiet). It bites the moment anyone reuses the model in a pipeline without one — which is exactly how it was found.
+
+**What this trainer does now:**
+- the clip is placed at a **random offset** in the window, and the rest is filled with a **faint noise floor** — so padding carries no class information,
+- **explicit silence negatives** (digital zero up to quiet room tone) are added to the training set: silence must be learned as *not the wake word*,
+- validation reports **silence false-alarms separately** and refuses to call a model good if they are above 0 %.
+
+Measured on the old model: silence → score **1.00**; normal speech → **no false alarms at all** (peak 0.11). The model was excellent at speech and simply believed silence was the phrase.
+
 ## Licenses
 
 - openWakeWord + feature models: Apache-2.0

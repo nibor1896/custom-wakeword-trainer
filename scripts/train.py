@@ -33,10 +33,40 @@ F = AudioFeatures(melspec_model_path=os.path.join(MODELS_DIR, "melspectrogram.on
 
 
 def load16k(path):
+    """Laedt einen Clip in ein TARGET-langes Fenster.
+
+    NICHT mit Nullen auffuellen! Die Positive sind kurz (~0.8 s) und wurden frueher links
+    mit DIGITALER STILLE auf 2 s gepolstert, waehrend die Masse der Negative (ACAV-Features)
+    aus vollem Audio besteht. Damit wird "viel fuehrende Stille" zum nahezu perfekten
+    Merkmal der positiven Klasse - das Modell lernt genau das und feuert anschliessend mit
+    Score 1.00 in einen voellig stillen Raum hinein (gemessen, siehe Issue #2).
+
+    Stattdessen: den Clip an ZUFAELLIGER Position im Fenster platzieren und den Rest mit
+    einem leisen Rauschboden fuellen, damit das Padding keine Klasseninformation traegt.
+    """
     d, sr = sf.read(path, dtype="float32", always_2d=False)
     if d.ndim > 1: d = d.mean(1)
-    if len(d) < TARGET: d = np.concatenate([np.zeros(TARGET - len(d), np.float32), d])
-    return d[:TARGET]
+    d = d[:TARGET]
+    if len(d) == TARGET:
+        return d
+    out = (rng.standard_normal(TARGET) * 1e-3).astype(np.float32)   # leiser Raumton-Boden
+    off = int(rng.integers(0, TARGET - len(d) + 1))
+    out[off:off + len(d)] += d
+    return out
+
+
+def silence_feats(n_per_level=10):
+    """Explizite STILLE-Negative: von digitaler Null bis leisem Raumton.
+
+    Direkte Versicherung gegen den gemessenen Fehler (Modell feuerte mit 1.00 in einen
+    stillen Raum). Ohne diese kann das Modell weiter in Richtung "leise = Wake-Word"
+    driften, weil in den echten Negativen kaum Stille vorkommt.
+    """
+    out = []
+    for s in (0.0, 1e-4, 5e-4, 1e-3, 3e-3, 1e-2):
+        for _ in range(n_per_level):
+            out.append(to_feat((rng.standard_normal(TARGET) * s).astype(np.float32)))
+    return np.stack(out).astype(np.float32)
 
 
 def to_feat(sig):
@@ -71,8 +101,16 @@ vn_f, tn_f = neg[:nvn], neg[nvn:]
 print(f"POS {len(pos)} ({nvp} val) | NEG {len(neg)} ({nvn} val)", flush=True)
 
 real_pos = embed_aug(tp_f, 20); real_neg = embed_aug(tn_f, 8)
+
+# Stille MUSS als negativ gelernt werden - sonst haelt das Modell einen stillen Raum
+# fuer das Wake-Word (siehe Issue #2).
+sil_train = silence_feats(10)
+real_neg = np.concatenate([real_neg, sil_train])
+print(f"Stille-Negative ergaenzt: {len(sil_train)}", flush=True)
+
 val_pos = np.stack([to_feat(load16k(f)) for f in vp_f]).astype(np.float32)
 val_neg = np.stack([to_feat(load16k(f)) for f in vn_f]).astype(np.float32)
+val_sil = silence_feats(5)          # zurueckgehaltene Stille -> ehrliche Zahlen
 
 neg_mm = np.load(NEG_FEATURES, mmap_mode="r")
 acav = torch.from_numpy(np.asarray(neg_mm[np.sort(rng.choice(neg_mm.shape[0], N_NEG_SUBSET, replace=False))], dtype=np.float16))
@@ -118,9 +156,16 @@ net.eval()
 with torch.no_grad():
     vp = net(torch.from_numpy(val_pos).to(dev)).squeeze(1).cpu().numpy()
     vn = net(torch.from_numpy(val_neg).to(dev)).squeeze(1).cpu().numpy()
-print(f"\n=== VALIDIERUNG (zurueckgehalten: {len(vp)} POS / {len(vn)} NEG) ===", flush=True)
+    vs = net(torch.from_numpy(val_sil).to(dev)).squeeze(1).cpu().numpy()
+print(f"\n=== VALIDIERUNG (zurueckgehalten: {len(vp)} POS / {len(vn)} NEG / {len(vs)} STILLE) ===", flush=True)
 for t in [0.5, 0.7, 0.9]:
-    print(f"  Schwelle {t}: Recall {(vp>=t).mean()*100:.0f}%  Fehlalarme {(vn>=t).mean()*100:.1f}%")
+    print(f"  Schwelle {t}: Recall {(vp>=t).mean()*100:.0f}%  "
+          f"Fehlalarme {(vn>=t).mean()*100:.1f}%  "
+          f"STILLE-Fehlalarme {(vs>=t).mean()*100:.1f}%")
+# Stille MUSS bei 0% liegen. Alles andere heisst: das Modell haelt einen leeren Raum
+# fuer das Wake-Word - genau der Fehler aus Issue #2, der frueher unbemerkt durchrutschte.
+if (vs >= 0.5).mean() > 0:
+    print("\n  !! WARNUNG: Das Modell feuert auf STILLE. Nicht ausliefern.", flush=True)
 
 net.to("cpu")
 torch.onnx.export(net, torch.rand(1, 16, 96), OUT, output_names=["probability"], dynamo=False)
