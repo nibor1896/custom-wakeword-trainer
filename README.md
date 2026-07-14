@@ -94,4 +94,6 @@ Measured on the old model: silence → score **1.00**; normal speech → **no fa
 
 ## Status
 
-See [Issue #1](https://github.com/nibor1896/custom-wakeword-trainer/issues/1). "Hey Horus" is trained, integrated into Horus, and confirmed live (90 % recall, 0 everyday false alarms).
+See [Issue #1](https://github.com/nibor1896/custom-wakeword-trainer/issues/1). "Hey Horus" is trained, integrated into Horus, and confirmed live (90 % recall, 0 everyday false alarms **on speech**).
+
+> ⚠️ **The `hey_horus.onnx` in this repo predates the zero-padding fix (2026-07-14)** and therefore **fires on silence** (score 1.00 in a quiet room — see the learning above). Inside Horus it is harmless, because a VAD gates it. **Do not reuse it in a pipeline without a speech gate**, and retrain with the current recipe to get a model that is clean on silence as well.
