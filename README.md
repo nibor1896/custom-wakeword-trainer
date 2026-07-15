@@ -42,8 +42,14 @@ The chain of reasoning that led exactly here:
 python -m venv venv && venv\Scripts\pip install -r requirements.txt
 ```
 
-1. **Download negative features** (~16 GB, precomputed, ~2000 h of speech/music/noise):
+1. **(Optional) Download negative features** (~16 GB, precomputed, ~2000 h of speech/music/noise):
    `python scripts/download_negatives.py`
+   > ⚠️ **License warning:** this feature set (ACAV100M via `openwakeword_features`) is
+   > **CC-BY-NC-SA 4.0 — NonCommercial**. A model trained with it inherits that restriction and
+   > **cannot be used commercially**. If you need a commercially clean model, skip this download
+   > (or set `WW_NO_ACAV=1`): the trainer then uses your recorded session negatives + generated
+   > silence alone. Measured on a real wake word ("Anima", ~1700 own negatives): recall and false
+   > alarms came out equal to the ACAV-trained model.
 2. **Generate synthetic positives** (many speakers, via [piper-sample-generator](https://github.com/rhasspy/piper-sample-generator)):
    ```bash
    # webrtcvad does not build on 3.13 -> use webrtcvad-wheels (in requirements.txt)
@@ -112,9 +118,14 @@ Still 90 % recall at threshold **0.9**, with zero false alarms on a keyboard bei
 
 ## Licenses
 
-- openWakeWord + feature models: Apache-2.0
+- openWakeWord code + melspectrogram/embedding models: Apache-2.0
 - LibriTTS-R (piper positive voices): CC-BY-4.0 → attribution required
-- ACAV100M: only precomputed features used, no audio ends up in the model
+- **ACAV100M feature set (`openwakeword_features`): CC-BY-NC-SA-4.0 — NonCommercial.** An
+  earlier version of this README claimed "only features are used, no audio ends up in the
+  model" — that was wrong as a license argument: the *feature files themselves* carry the NC
+  license, and the openWakeWord author licenses models trained on them as NC too. **A model
+  trained with this set must not be used commercially.** Train with `WW_NO_ACAV=1` (own
+  negatives + silence only) for a commercially clean model.
 - Any real recordings you add are baked into the weights (not recoverable as audio)
 
 ## Status

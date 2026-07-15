@@ -29,7 +29,7 @@ PHRASE = os.environ.get("WW_PHRASE", "hey_horus")
 MODELS_DIR = os.environ.get("WW_MODELS") or os.path.join(DATA, "models")   # melspectrogram.onnx + embedding_model.onnx (openWakeWord v0.5.1)
 POS_DIR = os.path.join(DATA, "session-pos")                     # clean session: ONLY the wake word, 16 kHz mono WAV
 NEG_DIR = os.path.join(DATA, "session-neg")                     # clean session: ONLY negatives
-NEG_FEATURES = os.path.join(DATA, "neg_ACAV100M_2000hrs.npy")   # from download_negatives.py
+NEG_FEATURES = os.environ.get("WW_NEG") or os.path.join(DATA, "neg_ACAV100M_2000hrs.npy")  # WW_NEG overrides with a commercially-clean neg_clean.npy (make_clean_negatives.py); default = NC ACAV dump
 SYNTH_POS_NPY = os.path.join(DATA, "pos_synth.npy")             # optional: pre-embedded piper positives (N,16,96), or absent
 OUT = os.path.join(HERE, "..", f"{PHRASE}.onnx")
 TARGET = 32000            # 2 s @ 16 kHz -> exactly 16 embedding frames
@@ -129,14 +129,16 @@ aug = Compose([
 ])
 
 
-def embed_aug(files, k):
+def embed_aug(files, k, label=""):
     """One clean copy per clip, then k augmented ones — augmented BEFORE being windowed."""
     out = []
-    for f in files:
+    for i, f in enumerate(files):
         raw = load_raw(f)
         out.append(to_feat(place(raw)))
         for _ in range(k):
             out.append(to_feat(place(aug(samples=raw, sample_rate=16000))))
+        if label and (i % 50 == 0 or i == len(files) - 1):
+            print(f"  embedding {label}: {i + 1}/{len(files)} clips...", flush=True)
     return np.stack(out).astype(np.float32)
 
 
@@ -149,8 +151,8 @@ vp_f, tp_f = pos[:nvp], pos[nvp:]
 vn_f, tn_f = neg[:nvn], neg[nvn:]
 print(f"POS {len(pos)} ({nvp} val) | NEG {len(neg)} ({nvn} val)", flush=True)
 
-real_pos = embed_aug(tp_f, 20)
-real_neg = embed_aug(tn_f, 8)
+real_pos = embed_aug(tp_f, 20, "positives")
+real_neg = embed_aug(tn_f, 8, "negatives (1724 clips — this is the slow part)")
 
 # Silence MUST be learned as negative — otherwise the model mistakes an empty room for the
 # wake word (see issue #2).
@@ -187,10 +189,23 @@ def tempo_feats(files, rate):
 TEMPI = [0.80, 0.90, 1.00, 1.10, 1.20, 1.30]
 val_tempo = {r: tempo_feats(vp_f, r) for r in TEMPI}
 
-neg_mm = np.load(NEG_FEATURES, mmap_mode="r")
-acav = torch.from_numpy(
-    np.asarray(neg_mm[np.sort(rng.choice(neg_mm.shape[0], N_NEG_SUBSET, replace=False))], dtype=np.float16)
-)
+# The bulk negatives are OPTIONAL. The shipped feature file (ACAV100M) is CC-BY-NC-SA — fine for
+# private use, but it forbids commercial use, so a wake model trained WITH it cannot be sold.
+# If the file is absent (or WW_NO_ACAV=1), train on the recorded session negatives + silence
+# ALONE — 100% your own, commercially clean. The trade-off is diversity: fewer unseen sounds are
+# covered, so watch the false-alarm numbers in the validation below to see if it is enough.
+USE_ACAV = os.path.exists(NEG_FEATURES) and os.environ.get("WW_NO_ACAV", "0") != "1"
+if USE_ACAV:
+    neg_mm = np.load(NEG_FEATURES, mmap_mode="r")
+    take = min(N_NEG_SUBSET, neg_mm.shape[0])
+    acav = torch.from_numpy(
+        np.asarray(neg_mm[np.sort(rng.choice(neg_mm.shape[0], take, replace=False))], dtype=np.float16)
+    )
+    print(f"bulk negatives: ACAV100M, {take} windows (NC-licensed — private use only)", flush=True)
+else:
+    acav = None
+    print(f"bulk negatives: NONE — session negatives + silence only "
+          f"({len(real_neg)} windows, commercially clean)", flush=True)
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 realp_t, realn_t = torch.from_numpy(real_pos).to(dev), torch.from_numpy(real_neg).to(dev)
 synth_t = (
@@ -236,8 +251,12 @@ for step in range(1, STEPS + 1):
         npos += 128
     parts.append(realp_t[torch.randint(0, realp_t.shape[0], (192,), device=dev)])
     npos += 192
-    parts.append(acav[torch.randint(0, acav.shape[0], (640,))].to(dev, torch.float32))
-    parts.append(realn_t[torch.randint(0, realn_t.shape[0], (320,), device=dev)])
+    if acav is not None:
+        parts.append(acav[torch.randint(0, acav.shape[0], (640,))].to(dev, torch.float32))
+        parts.append(realn_t[torch.randint(0, realn_t.shape[0], (320,), device=dev)])
+    else:
+        # no bulk set — draw all 960 negatives from the recorded session negatives + silence
+        parts.append(realn_t[torch.randint(0, realn_t.shape[0], (960,), device=dev)])
     xb = torch.cat(parts, 0)
     yb = torch.cat([torch.ones(npos, device=dev), torch.zeros(960, device=dev)])
     pred = net(xb).squeeze(1)
