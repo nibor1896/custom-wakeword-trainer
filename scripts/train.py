@@ -201,7 +201,10 @@ if USE_ACAV:
     acav = torch.from_numpy(
         np.asarray(neg_mm[np.sort(rng.choice(neg_mm.shape[0], take, replace=False))], dtype=np.float16)
     )
-    print(f"bulk negatives: ACAV100M, {take} windows (NC-licensed — private use only)", flush=True)
+    _is_acav = "ACAV" in os.path.basename(NEG_FEATURES)
+    _tag = "ACAV100M (NC-licensed — private use only)" if _is_acav else \
+        f"{os.path.basename(NEG_FEATURES)} (commercially clean)"
+    print(f"bulk negatives: {_tag}, {take} windows", flush=True)
 else:
     acav = None
     print(f"bulk negatives: NONE — session negatives + silence only "
