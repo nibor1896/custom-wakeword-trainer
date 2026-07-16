@@ -51,6 +51,19 @@ LINES = [
     "Guck mal {p}, das ist interessant.",
     "{p}, wie spät ist es eigentlich?",
     "Ach {p}, das ist doch Quatsch.",
+    # One-breath COMMANDS — the case measured at score 0.000 live (ANIMA: "Anima, mach mal den
+    # Editor auf", three real attempts, the model never fired). VARIED continuations on purpose:
+    # the model must learn the name regardless of what follows, not one command as a blob.
+    "{p}, mach mal den Editor auf.",
+    "{p}, kannst du mal den Editor öffnen?",
+    "{p}, was steht heute an?",
+    "{p}, merk dir das mal bitte.",
+    "{p}, wie wird das Wetter morgen?",
+    "{p}, mach das mal wieder zu.",
+    "{p}, lies mir das mal vor.",
+    "{p}, spiel mal irgendwas ab.",
+    "{p}, schreib das mal auf.",
+    "{p}, such mal danach.",
 ]
 
 ROUNDS = 3                  # each line said three times — nobody says it the same way twice
@@ -91,7 +104,8 @@ for r in range(ROUNDS):
         a = record(SECONDS)
         n += 1
         peak = int(np.abs(a).max())
-        path = os.path.join(OUT, f"pos_{start + n:04d}.wav")
+        # own prefix, like dist_*: every recording flavour must be droppable in a retrain
+        path = os.path.join(OUT, f"nat_{start + n:04d}.wav")
         sf.write(path, a, RATE, subtype="PCM_16")
         warn = "   ! very quiet" if peak < 800 else ""
         print(f"    saved {os.path.basename(path)}  (peak {peak}){warn}")
