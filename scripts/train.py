@@ -129,17 +129,113 @@ aug = Compose([
 ])
 
 
-def embed_aug(files, k, label=""):
-    """One clean copy per clip, then k augmented ones — augmented BEFORE being windowed."""
-    out = []
+# ---- competing-speech BACKGROUND augmentation for POSITIVES (issue #77) ---------------------------
+# The Gaussian aug above hardens the word against STATIONARY noise; it never covers OVERLAPPING SPEECH
+# (a TV / another talker), which is why a wake word trained with it still drowns under a television —
+# measured: median wake score collapses at a TV peak of ~6-8k, and the word survives it acoustically
+# yet the model does not (spectral masking, not SNR). This mixes a fraction of the positive copies into
+# a FULL 2 s window of real competing speech at a target SNR, so the model learns "the word is somewhere
+# inside continuous speech", the live case. Keep TV/speech a NEGATIVE too (so the WORD, not "speech
+# present", is the cue — contrastive by construction; the TV-alone-FA gate verifies it). min_snr
+# defaults to the human floor and is VERIFIED by the gauntlet on the trained model, not guessed.
+BG_FRAC = float(os.environ.get("WW_BG_FRAC", "0.34"))      # share of the k positive aug copies with speech bg
+BG_MIN_SNR = float(os.environ.get("WW_BG_MIN_SNR", "0"))   # dB (word == bg loudness at 0 dB); the hard end
+BG_MAX_SNR = float(os.environ.get("WW_BG_MAX_SNR", "24"))
+# #77 guard (measured): the bg-positives are 3x-weighted in the loss (see the pos_weight below), so
+# 1:1 matched negatives are outweighed and the "speech present -> fire" shortcut survives (TV-FA barely
+# moved, 23->22). Emit MATCHED_MULT matched (speech-alone) negatives per bg-positive to reach loss
+# PARITY with the 3x positive weight, so "speech present" is truly non-discriminative.
+MATCHED_MULT = int(os.environ.get("WW_MATCHED_MULT", "3"))
+# WW_BG = os.pathsep-joined dirs/files of background speech; default = MUSAN speech. Add your own TV:
+#   WW_BG="<data>/musan/speech;/path/to/your_tv.wav"   — and keep it DISJOINT from the masking-gate TV.
+BG_PATHS = os.environ.get("WW_BG", os.path.join(DATA, "musan", "speech")).split(os.pathsep)
+
+
+def _list_bg(paths):
+    fs = []
+    for p in paths:
+        p = p.strip()
+        if os.path.isdir(p):
+            fs += glob.glob(os.path.join(p, "**", "*.wav"), recursive=True)
+        elif os.path.isfile(p):
+            fs.append(p)
+    return fs
+
+
+BG_FILES = _list_bg(BG_PATHS)
+
+
+def _rms(x):
+    return float(np.sqrt(np.mean(np.asarray(x, dtype=np.float64) ** 2))) or 1e-9
+
+
+def random_bg(n):
+    """A random n-sample segment of real competing speech (16 kHz mono; tiled if a file is short)."""
+    d, _sr = sf.read(BG_FILES[int(rng.integers(len(BG_FILES)))], dtype="float32", always_2d=False)
+    if d.ndim > 1:
+        d = d.mean(1)
+    if len(d) < n:
+        d = np.tile(d, int(np.ceil(n / len(d))))
+    off = int(rng.integers(0, len(d) - n + 1))
+    return d[off:off + n].astype(np.float32)
+
+
+def place_on_bg(word, snr_db):
+    """The word dropped at a random offset into a FULL-window competing-speech background at `snr_db`
+    (word/bg RMS ratio). Returns (POSITIVE, MATCHED_NEGATIVE): the positive is bg+word, the matched
+    negative is the SAME bg segment ALONE (#77) — so 'competing speech present' appears equally in both
+    classes and becomes non-discriminative; only 'Anima' separates them. Without this the model takes
+    the shortcut 'speech present -> fire' (measured: fires on Anima+TV AND on TV-alone)."""
+    word = np.asarray(word, dtype=np.float32)[:TARGET]
+    bg = random_bg(TARGET)
+    bg = bg * (_rms(word) / (10.0 ** (snr_db / 20.0)) / _rms(bg))
+    pos = bg.copy()
+    if len(word) >= TARGET:
+        pos[:TARGET] += word[:TARGET]
+    else:
+        off = int(rng.integers(0, TARGET - len(word) + 1))
+        pos[off:off + len(word)] += word
+    return np.clip(pos, -1.0, 1.0).astype(np.float32), np.clip(bg, -1.0, 1.0).astype(np.float32)
+
+
+# word-level aug for the speech-bg copies: gain / pitch / tempo, but NOT AddGaussianSNR — the real
+# background IS the interference; no need to pile Gaussian noise on top of overlapping speech.
+aug_no_noise = Compose([
+    Gain(min_gain_db=-12.0, max_gain_db=6.0, p=0.9),
+    PitchShift(min_semitones=-3.0, max_semitones=3.0, p=0.7),
+    TimeStretch(min_rate=0.75, max_rate=1.35, p=0.9, leave_length_unchanged=False),
+])
+
+if BG_FILES:
+    print(f"#77 speech-bg aug: {len(BG_FILES)} background files, ~{int(round(20 * BG_FRAC))}/20 pos "
+          f"copies, SNR {BG_MIN_SNR:g}..{BG_MAX_SNR:g} dB (weighted hard)", flush=True)
+
+
+def embed_aug(files, k, label="", speech_bg=False):
+    """One clean copy per clip, then k augmented ones — augmented BEFORE being windowed. Returns
+    (positive_feats, matched_negative_feats). For positives (#77, speech_bg=True), a BG_FRAC share of
+    the k copies mix in a full-window competing-speech background; each such copy ALSO yields the same
+    background ALONE as a MATCHED NEGATIVE (returned separately) so 'speech present' is balanced across
+    classes. For negatives (speech_bg=False) the matched array is empty."""
+    n_bg = int(round(k * BG_FRAC)) if (speech_bg and BG_FILES) else 0
+    out, matched = [], []
     for i, f in enumerate(files):
         raw = load_raw(f)
         out.append(to_feat(place(raw)))
-        for _ in range(k):
-            out.append(to_feat(place(aug(samples=raw, sample_rate=16000))))
+        for j in range(k):
+            if j < n_bg:
+                snr = BG_MIN_SNR + (BG_MAX_SNR - BG_MIN_SNR) * float(rng.random()) ** 2   # bias to the hard end
+                pos_sig, neg_sig = place_on_bg(aug_no_noise(samples=raw, sample_rate=16000), snr)
+                out.append(to_feat(pos_sig))
+                matched.append(to_feat(neg_sig))                 # #77: the SAME bg alone = matched negative
+                for _ in range(MATCHED_MULT - 1):                # + more speech-alone negs -> loss parity vs the 3x pos weight
+                    matched.append(to_feat(np.clip(random_bg(TARGET), -1.0, 1.0).astype(np.float32)))
+            else:
+                out.append(to_feat(place(aug(samples=raw, sample_rate=16000))))
         if label and (i % 50 == 0 or i == len(files) - 1):
             print(f"  embedding {label}: {i + 1}/{len(files)} clips...", flush=True)
-    return np.stack(out).astype(np.float32)
+    m = np.stack(matched).astype(np.float32) if matched else np.zeros((0, 16, 96), np.float32)
+    return np.stack(out).astype(np.float32), m
 
 
 pos = sorted(glob.glob(os.path.join(POS_DIR, "*.wav")))
@@ -151,14 +247,16 @@ vp_f, tp_f = pos[:nvp], pos[nvp:]
 vn_f, tn_f = neg[:nvn], neg[nvn:]
 print(f"POS {len(pos)} ({nvp} val) | NEG {len(neg)} ({nvn} val)", flush=True)
 
-real_pos = embed_aug(tp_f, 20, "positives")
-real_neg = embed_aug(tn_f, 8, "negatives (1724 clips — this is the slow part)")
+real_pos, matched_neg = embed_aug(tp_f, 20, "positives", speech_bg=True)
+real_neg, _ = embed_aug(tn_f, 8, "negatives (1724 clips — this is the slow part)")
 
 # Silence MUST be learned as negative — otherwise the model mistakes an empty room for the
 # wake word (see issue #2).
 sil_train = silence_feats(10)
-real_neg = np.concatenate([real_neg, sil_train])
-print(f"silence negatives added: {len(sil_train)}", flush=True)
+# #77: the matched background negatives (same bg segments used to build the bg-positives, alone) go
+# into the negative pool — this is what forces the model onto 'Anima', not 'speech present'.
+real_neg = np.concatenate([real_neg, matched_neg, sil_train])
+print(f"silence negatives added: {len(sil_train)} | #77 matched bg negatives added: {len(matched_neg)}", flush=True)
 
 val_pos = np.stack([to_feat(load16k(f)) for f in vp_f]).astype(np.float32)
 val_neg = np.stack([to_feat(load16k(f)) for f in vn_f]).astype(np.float32)
