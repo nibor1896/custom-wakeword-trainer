@@ -3,3 +3,7 @@ data/
 __pycache__/
 *.pyc
 *.pt
+
+# Trained OUTPUT models are build artifacts, not source — keep them out of the generic tool repo.
+# (hey_horus.onnx is kept as the shipped demo; a real deployment's model does not belong here.)
+/anima.onnx
